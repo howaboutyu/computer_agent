@@ -74,6 +74,10 @@ backups/
 # API test results
 api_results/
 
+# Test images
+test_image.png
+*.png
+
 # Test coverage
 .coverage
 htmlcov/
