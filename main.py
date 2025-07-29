@@ -10,6 +10,8 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import io
+import time
+from functools import lru_cache
 try:
     from qwen_vl_utils import process_vision_info
     from datasets import load_dataset
@@ -23,7 +25,7 @@ except ImportError as e:
     print("Please install GUI-Actor: cd GUI-Actor && pip install -e .")
     GUI_ACTOR_AVAILABLE = False
 
-MAX_PIXELS = 3200 * 1800
+MAX_PIXELS = 1600 * 900  # Reduced for faster processing
 
 app = FastAPI(
     title="GUI-Actor API",
@@ -41,11 +43,13 @@ app.add_middleware(
 )
 
 def resize_image(image, resize_to_pixels=MAX_PIXELS):
+    """Optimized image resizing for faster processing"""
     image_width, image_height = image.size
-    if (resize_to_pixels is not None) and ((image_width * image_height) != resize_to_pixels):
+    if (resize_to_pixels is not None) and ((image_width * image_height) > resize_to_pixels):
         resize_ratio = (resize_to_pixels / (image_width * image_height)) ** 0.5
         image_width_resized, image_height_resized = int(image_width * resize_ratio), int(image_height * resize_ratio)
-        image = image.resize((image_width_resized, image_height_resized))
+        # Use LANCZOS for better quality/speed balance
+        image = image.resize((image_width_resized, image_height_resized), Image.Resampling.LANCZOS)
     return image
 
 @torch.inference_mode()
@@ -63,16 +67,29 @@ def draw_point(image: Image.Image, point: list, radius=8, color=(255, 0, 0, 128)
     combined = combined.convert('RGB')
     return combined
 
+# Cache colormap for faster attention map generation
+@lru_cache(maxsize=1)
+def get_colormap():
+    return plt.get_cmap('jet')
+
 @torch.inference_mode()
 def get_attn_map(image, attn_scores, n_width, n_height):
+    """Optimized attention map generation"""
     w, h = image.size
     scores = np.array(attn_scores[0]).reshape(n_height, n_width)
 
-    scores_norm = (scores - scores.min()) / (scores.max() - scores.min())
+    # Optimize normalization
+    scores_min, scores_max = scores.min(), scores.max()
+    if scores_max > scores_min:
+        scores_norm = (scores - scores_min) / (scores_max - scores_min)
+    else:
+        scores_norm = scores * 0  # All zeros if no variation
+    
     # Resize score map to match image size
-    score_map = Image.fromarray((scores_norm * 255).astype(np.uint8)).resize((w, h), resample=Image.NEAREST) # BILINEAR)
-    # Apply colormap
-    colormap = plt.get_cmap('jet')
+    score_map = Image.fromarray((scores_norm * 255).astype(np.uint8)).resize((w, h), resample=Image.Resampling.NEAREST)
+    
+    # Apply colormap (cached)
+    colormap = get_colormap()
     colored_score_map = colormap(np.array(score_map) / 255.0)  # returns RGBA
     colored_score_map = (colored_score_map[:, :, :3] * 255).astype(np.uint8)
     colored_overlay = Image.fromarray(colored_score_map)
@@ -87,7 +104,7 @@ tokenizer = None
 data_processor = None
 
 def load_model():
-    """Load the model globally"""
+    """Load the model globally with optimizations"""
     global model, tokenizer, data_processor
     
     if not GUI_ACTOR_AVAILABLE:
@@ -97,7 +114,7 @@ def load_model():
     try:
         if torch.cuda.is_available():
             model_name_or_path = "microsoft/GUI-Actor-7B-Qwen2.5-VL"
-            data_processor = AutoProcessor.from_pretrained(model_name_or_path)
+            data_processor = AutoProcessor.from_pretrained(model_name_or_path, use_fast=True)
             tokenizer = data_processor.tokenizer
             model = Qwen2_5_VLForConditionalGenerationWithPointer.from_pretrained(
                 model_name_or_path,
@@ -105,15 +122,25 @@ def load_model():
                 device_map="cuda:0",
                 attn_implementation="flash_attention_2"
             ).eval()
+            
+            # Optimize for inference
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            
         else:
             model_name_or_path = "microsoft/GUI-Actor-3B-Qwen2.5-VL"
-            data_processor = AutoProcessor.from_pretrained(model_name_or_path)
+            data_processor = AutoProcessor.from_pretrained(model_name_or_path, use_fast=True)
             tokenizer = data_processor.tokenizer
             model = Qwen2_5_VLForConditionalGenerationWithPointer.from_pretrained(
                 model_name_or_path,
                 torch_dtype=torch.bfloat16,
                 device_map="cpu"
             ).eval()
+            
+            # Optimize for CPU inference
+            torch.set_num_threads(os.cpu_count())
+            
     except Exception as e:
         print(f"Error loading model: {e}")
         print("Please ensure you have the correct model files and dependencies installed.")
@@ -126,15 +153,20 @@ def image_to_base64(image: Image.Image) -> str:
     return f"data:image/png;base64,{img_str}"
 
 @torch.inference_mode()
-def process(image: Image.Image, instruction: str):
-    """Process the image and instruction to get predictions"""
+def process(image: Image.Image, instruction: str, fast_mode: bool = False):
+    """Process the image and instruction to get predictions with timing"""
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded. Please check installation.")
+    
+    start_time = time.time()
     
     # resize image
     w, h = image.size
     if w * h > MAX_PIXELS:
         image = resize_image(image)
+    
+    resize_time = time.time()
+    print(f"⏱️  Resize time: {(resize_time - start_time)*1000:.1f}ms")
 
     conversation = [
         {
@@ -163,25 +195,46 @@ def process(image: Image.Image, instruction: str):
     ]
 
     try:
+        inference_start = time.time()
         pred = inference(conversation, model, tokenizer, data_processor, use_placeholder=True, topk=3)
+        inference_time = time.time()
+        print(f"⏱️  Inference time: {(inference_time - inference_start)*1000:.1f}ms")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error during inference: {str(e)}")
 
     px, py = pred["topk_points"][0]
     output_coord = f"({px:.4f}, {py:.4f})"
+    
+    # Optimize image processing
+    post_start = time.time()
     img_with_point = draw_point(image, (px * w, py * h))
 
-    n_width, n_height = pred["n_width"], pred["n_height"]
-    attn_scores = pred["attn_scores"]
-    att_map = get_attn_map(image, attn_scores, n_width, n_height)
+    # Skip attention map in fast mode
+    if fast_mode:
+        att_map = None
+    else:
+        n_width, n_height = pred["n_width"], pred["n_height"]
+        attn_scores = pred["attn_scores"]
+        att_map = get_attn_map(image, attn_scores, n_width, n_height)
+    
+    post_time = time.time()
+    print(f"⏱️  Post-processing time: {(post_time - post_start)*1000:.1f}ms")
 
-    return {
+    total_time = time.time() - start_time
+    print(f"⏱️  Total processing time: {total_time*1000:.1f}ms")
+
+    result = {
         "image_with_point": image_to_base64(img_with_point),
         "coordinates": output_coord,
-        "attention_map": image_to_base64(att_map),
         "raw_coordinates": {"x": px, "y": py},
-        "image_size": {"width": w, "height": h}
+        "image_size": {"width": w, "height": h},
+        "processing_time_ms": total_time * 1000
     }
+    
+    if not fast_mode and att_map:
+        result["attention_map"] = image_to_base64(att_map)
+    
+    return result
 
 @app.on_event("startup")
 async def startup_event():
@@ -212,7 +265,8 @@ async def health_check():
 @app.post("/process")
 async def process_image(
     image: UploadFile = File(...),
-    instruction: str = Form(...)
+    instruction: str = Form(...),
+    fast_mode: bool = Form(False)
 ):
     """
     Process an image with an instruction to locate GUI elements

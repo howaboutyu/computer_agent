@@ -71,6 +71,9 @@ tmp/
 backups/
 *.bak
 
+# API test results
+api_results/
+
 # Test coverage
 .coverage
 htmlcov/
