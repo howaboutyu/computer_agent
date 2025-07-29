@@ -10,12 +10,18 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import io
-from qwen_vl_utils import process_vision_info
-from datasets import load_dataset
-from transformers import AutoProcessor
-from gui_actor.constants import chat_template
-from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
-from gui_actor.inference import inference
+try:
+    from qwen_vl_utils import process_vision_info
+    from datasets import load_dataset
+    from transformers import AutoProcessor
+    from gui_actor.constants import chat_template
+    from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
+    from gui_actor.inference import inference
+    GUI_ACTOR_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: GUI-Actor dependencies not available: {e}")
+    print("Please install GUI-Actor: cd GUI-Actor && pip install -e .")
+    GUI_ACTOR_AVAILABLE = False
 
 MAX_PIXELS = 3200 * 1800
 
@@ -84,25 +90,33 @@ def load_model():
     """Load the model globally"""
     global model, tokenizer, data_processor
     
-    if torch.cuda.is_available():
-        model_name_or_path = "microsoft/GUI-Actor-7B-Qwen2.5-VL"
-        data_processor = AutoProcessor.from_pretrained(model_name_or_path)
-        tokenizer = data_processor.tokenizer
-        model = Qwen2_5_VLForConditionalGenerationWithPointer.from_pretrained(
-            model_name_or_path,
-            torch_dtype=torch.bfloat16,
-            device_map="cuda:0",
-            attn_implementation="flash_attention_2"
-        ).eval()
-    else:
-        model_name_or_path = "microsoft/GUI-Actor-3B-Qwen2.5-VL"
-        data_processor = AutoProcessor.from_pretrained(model_name_or_path)
-        tokenizer = data_processor.tokenizer
-        model = Qwen2_5_VLForConditionalGenerationWithPointer.from_pretrained(
-            model_name_or_path,
-            torch_dtype=torch.bfloat16,
-            device_map="cpu"
-        ).eval()
+    if not GUI_ACTOR_AVAILABLE:
+        print("Error: GUI-Actor dependencies not available. Please install them first.")
+        return
+    
+    try:
+        if torch.cuda.is_available():
+            model_name_or_path = "microsoft/GUI-Actor-7B-Qwen2.5-VL"
+            data_processor = AutoProcessor.from_pretrained(model_name_or_path)
+            tokenizer = data_processor.tokenizer
+            model = Qwen2_5_VLForConditionalGenerationWithPointer.from_pretrained(
+                model_name_or_path,
+                torch_dtype=torch.bfloat16,
+                device_map="cuda:0",
+                attn_implementation="flash_attention_2"
+            ).eval()
+        else:
+            model_name_or_path = "microsoft/GUI-Actor-3B-Qwen2.5-VL"
+            data_processor = AutoProcessor.from_pretrained(model_name_or_path)
+            tokenizer = data_processor.tokenizer
+            model = Qwen2_5_VLForConditionalGenerationWithPointer.from_pretrained(
+                model_name_or_path,
+                torch_dtype=torch.bfloat16,
+                device_map="cpu"
+            ).eval()
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        print("Please ensure you have the correct model files and dependencies installed.")
 
 def image_to_base64(image: Image.Image) -> str:
     """Convert PIL Image to base64 string"""
@@ -114,6 +128,9 @@ def image_to_base64(image: Image.Image) -> str:
 @torch.inference_mode()
 def process(image: Image.Image, instruction: str):
     """Process the image and instruction to get predictions"""
+    if model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded. Please check installation.")
+    
     # resize image
     w, h = image.size
     if w * h > MAX_PIXELS:

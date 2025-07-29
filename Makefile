@@ -5,14 +5,18 @@ PYTHON := python3
 PIP := pip3
 PORT := 8080
 
-.PHONY: help install run dev test clean docker-up docker-down
+.PHONY: help install install-submodule run dev test clean docker-up docker-down
 
 help: ## Show this help message
 	@echo "Available commands:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
 
-install: ## Install dependencies
+install-submodule: ## Initialize and update git submodules
+	git submodule update --init --recursive
+
+install: install-submodule ## Install dependencies
 	$(PIP) install -r requirements.txt
+	./install_gui_actor.sh
 
 run: ## Run production server
 	$(PYTHON) main.py

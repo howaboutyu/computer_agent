@@ -1,0 +1,3 @@
+[submodule "GUI-Actor"]
+	path = GUI-Actor
+	url = https://github.com/microsoft/GUI-Actor.git
