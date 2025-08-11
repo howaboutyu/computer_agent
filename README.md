@@ -1,208 +1,80 @@
-# GUI-Actor FastAPI
+# Computer-Use Agent Scaffold
 
-A FastAPI implementation of the GUI-Actor model for coordinate-free visual grounding of GUI agents.
+This repository provides a minimal, production-minded scaffold for "computer-use" agents across web and non-web (desktop and mobile) environments.
 
-## Overview
+- Planner: simple rule-based planner (default) with an optional OpenAI tool-calling planner
+- Schema: strict JSON Action schema (click/type/scroll/wait_for, plus non-web extensions)
+- Executors: web executor using Playwright (runnable on Linux), stubs/hooks for desktop and mobile
+- Runner: CLI to run tasks
+- Tracing: per-step logs and screenshots
 
-This FastAPI application provides REST API endpoints for processing GUI screenshots and natural language instructions to locate and interact with UI elements. It's based on the original Gradio implementation but converted to a production-ready API service.
+## Why this scaffold
+- Start fast with web automation that is robust (DOM-first, bbox fallback)
+- Keep non-web in mind with action schema and planner abstractions you can extend
+- Lazy imports so `--help` works without installing heavy deps
 
-## Features
+## Requirements
+- Python 3.10+
+- Linux/macOS/Windows (web path tested on Linux)
 
-- **Image Processing**: Upload images or send base64-encoded images
-- **Natural Language Instructions**: Process human-readable instructions to locate UI elements
-- **Coordinate Prediction**: Get precise coordinates for clicking on UI elements
-- **Visual Feedback**: Receive images with highlighted click points and attention maps
-- **Health Monitoring**: Built-in health check endpoints
-- **CORS Support**: Cross-origin resource sharing enabled
+Optional:
+- OpenAI API key for the OpenAI planner: set `OPENAI_API_KEY`
 
 ## Installation
 
-1. **Install Dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+# Install browsers for Playwright (once):
+python -m playwright install --with-deps
+```
 
-2. **Install GUI-Actor Dependencies**:
-   ```bash
-   # Clone the GUI-Actor repository if you haven't already
-   git clone https://github.com/microsoft/GUI-Actor.git
-   cd GUI-Actor
-   pip install -e .
-   ```
+## Quickstart (Web)
 
-## Usage
-
-### Starting the Server
+Run a simple task that clicks an element by CSS selector.
 
 ```bash
-python main.py
+python -m agent.runner \
+  --platform web \
+  --url https://example.org \
+  --goal "click selector=a"
 ```
 
-The server will start on `http://localhost:8080` by default.
+- The rule-based planner recognizes goals like `click selector=...`, `type selector=... text=...`, `wait_for selector=...`.
+- Traces are written to `./traces/<timestamp>/`.
 
-### API Endpoints
-
-#### 1. Health Check
-```bash
-GET /health
-```
-
-Returns the health status of the service and model loading status.
-
-**Response**:
-```json
-{
-  "status": "healthy",
-  "model_loaded": true,
-  "cuda_available": true
-}
-```
-
-#### 2. Process Image (File Upload)
-```bash
-POST /process
-```
-
-**Parameters**:
-- `image`: Image file (multipart/form-data)
-- `instruction`: Text instruction (form data)
-
-**Example using curl**:
-```bash
-curl -X POST "http://localhost:8080/process" \
-  -F "image=@screenshot.png" \
-  -F "instruction=Click on the login button"
-```
-
-#### 3. Process Image (Base64)
-```bash
-POST /process-base64
-```
-
-**Parameters**:
-- `image_base64`: Base64 encoded image string
-- `instruction`: Text instruction
-
-**Example using curl**:
-```bash
-curl -X POST "http://localhost:8080/process-base64" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "image_base64=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..." \
-  -d "instruction=Click on the login button"
-```
-
-### Response Format
-
-Both processing endpoints return the same JSON response:
-
-```json
-{
-  "image_with_point": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...",
-  "coordinates": "(0.5234, 0.6789)",
-  "attention_map": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...",
-  "raw_coordinates": {
-    "x": 0.5234,
-    "y": 0.6789
-  },
-  "image_size": {
-    "width": 1920,
-    "height": 1080
-  }
-}
-```
-
-**Response Fields**:
-- `image_with_point`: Base64 encoded image with red circle showing the predicted click location
-- `coordinates`: Formatted coordinate string
-- `attention_map`: Base64 encoded attention map visualization
-- `raw_coordinates`: Raw x, y coordinates (normalized 0-1)
-- `image_size`: Original image dimensions
-
-## Testing
-
-Use the provided test client to verify the API:
+Use the OpenAI planner (optional):
 
 ```bash
-python test_client.py
+export OPENAI_API_KEY=sk-...  # or set via your secret manager
+python -m agent.runner \
+  --platform web \
+  --planner openai \
+  --url https://example.org \
+  --goal "Open the first link on the page and wait for navigation"
 ```
 
-Modify the test client to use your own images and instructions.
+## Desktop and Mobile (non-web)
+This scaffold includes the action schema and planner hooks for desktop/mobile, but the executors are placeholders. Implementations vary by OS:
 
-## Model Information
+- Desktop (Linux/Windows/macOS): prefer Accessibility APIs (AT-SPI/UIA/AX) and fall back to pixel actions
+- Mobile (Android/iOS): prefer UI hierarchy (uiautomator2/WDA) via Appium; fall back to image crops when needed
 
-The application automatically loads the appropriate model based on hardware availability:
+You can add your own executors under `agent/executors/desktop_executor.py` and `agent/executors/mobile_executor.py`.
 
-- **CUDA Available**: Uses `microsoft/GUI-Actor-7B-Qwen2.5-VL` with flash attention
-- **CPU Only**: Uses `microsoft/GUI-Actor-3B-Qwen2.5-VL`
+## Project layout
 
-## Configuration
+- `agent/planner/schema.py` — strict JSON action schema
+- `agent/planner/simple_planner.py` — rule-based planner for demo goals
+- `agent/planner/openai_planner.py` — optional OpenAI planner with tool-calling
+- `agent/executors/web_executor.py` — Playwright-based web executor
+- `agent/runner.py` — CLI entrypoint
+- `agent/tracing.py` — lightweight tracing utilities
 
-### Environment Variables
-
-- `MAX_PIXELS`: Maximum image size in pixels (default: 3200 * 1800)
-- `PORT`: Server port (default: 8080)
-- `HOST`: Server host (default: 0.0.0.0)
-
-### Model Configuration
-
-The model is loaded with the following settings:
-- **CUDA**: `torch_dtype=torch.bfloat16`, `device_map="cuda:0"`, `attn_implementation="flash_attention_2"`
-- **CPU**: `torch_dtype=torch.bfloat16`, `device_map="cpu"`
-
-## Error Handling
-
-The API includes comprehensive error handling:
-
-- **400 Bad Request**: Invalid image format or missing parameters
-- **500 Internal Server Error**: Model inference errors or processing failures
-
-## Performance Considerations
-
-- Images are automatically resized if they exceed `MAX_PIXELS`
-- The model is loaded once at startup and reused for all requests
-- Inference is performed with `@torch.inference_mode()` for optimal performance
-
-## Integration Examples
-
-### Python Client
-```python
-import requests
-
-def process_gui_image(image_path, instruction):
-    with open(image_path, 'rb') as f:
-        files = {'image': f}
-        data = {'instruction': instruction}
-        response = requests.post('http://localhost:8080/process', files=files, data=data)
-        return response.json()
-
-# Usage
-result = process_gui_image('screenshot.png', 'Click the submit button')
-print(f"Click at coordinates: {result['coordinates']}")
-```
-
-### JavaScript Client
-```javascript
-async function processGUIImage(imageFile, instruction) {
-    const formData = new FormData();
-    formData.append('image', imageFile);
-    formData.append('instruction', instruction);
-    
-    const response = await fetch('http://localhost:8080/process', {
-        method: 'POST',
-        body: formData
-    });
-    
-    return await response.json();
-}
-```
-
-## Troubleshooting
-
-1. **Model Loading Issues**: Ensure you have sufficient RAM/VRAM for the model
-2. **CUDA Errors**: Install appropriate CUDA drivers and PyTorch version
-3. **Memory Issues**: Reduce `MAX_PIXELS` or use CPU-only mode
-4. **Import Errors**: Ensure GUI-Actor dependencies are properly installed
+## Notes
+- Keep planner messages small by sending DOM and cropped screenshots; prefer DOM selectors when available.
+- For desktop/mobile, add assertions based on accessibility trees to increase reliability.
 
 ## License
-
-This project follows the same license as the original GUI-Actor repository. 
+MIT 
